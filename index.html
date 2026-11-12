@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coach Oral FLE — Le Sport</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>⚽ Coach Oral FLE</h1>
+    <p>Le sport, le matériel et les règles — Niveau A1</p>
+  </header>
+
+  <nav id="tabs">
+    <button class="tab active" data-tab="prononciation">🎙️ Prononciation</button>
+    <button class="tab" data-tab="dialogue">💬 Dialogue</button>
+    <button class="tab" data-tab="expose">📝 Exposé</button>
+  </nav>
+
+  <main>
+    <section id="prononciation" class="panel active">
+      <div class="card">
+        <h2>Choisis une phrase</h2>
+        <div id="phrase-groupes"></div>
+      </div>
+      <div class="card" id="phrase-card">
+        <p class="phrase" id="phrase-texte">—</p>
+        <p class="tip" id="phrase-tip"></p>
+        <div class="row">
+          <button id="btn-ecouter" class="btn secondary">🔊 Écouter</button>
+          <button id="btn-ecouter-lent" class="btn secondary">🐢 Écouter lentement</button>
+        </div>
+        <button id="btn-micro" class="btn primary big">🎤 Je répète !</button>
+        <p class="reco" id="pron-reco"></p>
+        <div id="pron-mots" class="mots"></div>
+        <p class="feedback" id="pron-feedback"></p>
+      </div>
+    </section>
+
+    <section id="dialogue" class="panel">
+      <div class="card chat-card">
+        <div id="chat"></div>
+        <div class="row">
+          <button id="btn-micro-chat" class="btn primary">🎤 Parler</button>
+          <input type="text" id="chat-input" placeholder="Ou écris ici...">
+          <button id="btn-envoyer" class="btn secondary">Envoyer</button>
+        </div>
+        <p class="reco" id="chat-reco"></p>
+      </div>
+      <button id="btn-restart" class="btn secondary">↺ Recommencer le dialogue</button>
+    </section>
+
+    <section id="expose" class="panel">
+      <div class="card">
+        <h2>Mon plan d'exposé</h2>
+        <div id="plan"></div>
+      </div>
+      <div class="card">
+        <h2>Je m'entraîne 🎤</h2>
+        <p>Appuie sur le bouton, puis présente ton exposé à voix haute. Quand tu as fini, appuie sur « Stop ».</p>
+        <div class="row">
+          <button id="btn-micro-expose" class="btn primary big">🎤 Je commence</button>
+          <span id="chrono" class="chrono">0:00</span>
+        </div>
+        <p class="reco" id="expose-reco"></p>
+        <div id="expose-eval"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p id="support-note"></p>
+  </footer>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
