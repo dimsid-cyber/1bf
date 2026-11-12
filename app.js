@@ -5,16 +5,13 @@ const $ = (id) => document.getElementById(id);
 
 let voix = null;
 let reco = null;
-let etape = 0;
-let essais = 0;
-let essaisSilence = 0;
+let historique = [];
 let mode = null;
 let dernierEntendu = "";
 let erreurReco = null;
-let transcriptionExpose = "";
-let secondes = 0;
-let minuteurChrono = null;
+let essaisSilence = 0;
 let ecouteEnCours = false;
+let enTraitement = false;
 
 function normaliser(t) {
   return t
@@ -70,6 +67,26 @@ function parler(texte, lent = false) {
   });
 }
 
+async function repondreIA() {
+  const messages = [{ role: "system", content: SYSTEME }, ...historique.slice(-12)];
+  const controleur = new AbortController();
+  const timeout = setTimeout(() => controleur.abort(), 25000);
+  try {
+    const r = await fetch("https://text.pollinations.ai/openai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai", messages, max_tokens: 120, temperature: 0.7 }),
+      signal: controleur.signal
+    });
+    if (!r.ok) throw new Error("http " + r.status);
+    const d = await r.json();
+    const texte = d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
+    return texte ? texte.trim() : null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function setOrbe(etat) {
   $("orbe").className = "orbe " + etat;
 }
@@ -89,7 +106,7 @@ function arreterEcoute() {
   ecouteEnCours = false;
 }
 
-function demarrerEcoute(continu, onFinal, onInterim, onFin) {
+function demarrerEcoute(onFinal, onInterim, onFin) {
   if (!SR) return false;
   arreterEcoute();
   dernierEntendu = "";
@@ -97,7 +114,7 @@ function demarrerEcoute(continu, onFinal, onInterim, onFin) {
   ecouteEnCours = true;
   reco = new SR();
   reco.lang = "fr-FR";
-  reco.continuous = continu;
+  reco.continuous = false;
   reco.interimResults = true;
   let final = "";
   reco.onresult = (e) => {
@@ -122,23 +139,6 @@ function demarrerEcoute(continu, onFinal, onInterim, onFin) {
   return true;
 }
 
-function motsTrouves(cible, dit) {
-  const cibleN = normaliser(cible);
-  const ditN = normaliser(dit);
-  let p = 0;
-  const mots = cibleN.split(" ").map((mot) => {
-    const idx = ditN.indexOf(mot, p);
-    if (idx !== -1) { p = idx + 1; return { mot, ok: true }; }
-    return { mot, ok: false };
-  });
-  return { score: mots.filter((m) => m.ok).length / mots.length };
-}
-
-function correspond(step, texte) {
-  const t = normaliser(texte);
-  return step.keys.some((k) => t.includes(normaliser(k)));
-}
-
 function gererErreurMicro() {
   if (!erreurReco) return false;
   if (erreurReco === "not-allowed" || erreurReco === "service-not-allowed") {
@@ -159,133 +159,53 @@ function gererErreurMicro() {
   return false;
 }
 
-async function ecouterReponse(m) {
-  mode = m;
+async function ecouterReponse() {
+  if (enTraitement) return;
+  mode = "libre";
   montrer("btn-micro");
   $("btn-micro").textContent = "🎤 Appuie et parle";
   $("btn-micro").classList.remove("recording");
   const lance = demarrerEcoute(
-    false,
-    (final) => { arreterEcoute(); traiter(m, final); },
+    (final) => { arreterEcoute(); envoyer(final); },
     (interim) => entendu("🗣️ " + interim),
-    () => finEcouteReponse(m)
+    () => finEcouteReponse()
   );
   if (lance) setOrbe("ecoute");
 }
 
-async function finEcouteReponse(m) {
-  if (ecouteEnCours) return;
+async function finEcouteReponse() {
+  if (ecouteEnCours || enTraitement) return;
   if (gererErreurMicro()) { setOrbe("idle"); return; }
-  if (dernierEntendu.trim()) { traiter(m, dernierEntendu.trim()); return; }
+  if (dernierEntendu.trim()) { envoyer(dernierEntendu.trim()); return; }
   essaisSilence++;
   if (essaisSilence <= 2) {
     await parler("Je ne t'ai pas entendu ! Appuie sur le bouton et parle !");
-    ecouterReponse(m);
+    ecouterReponse();
   } else {
     sousTitre("Appuie sur 🎤 et parle plus près du micro !");
     setOrbe("idle");
   }
 }
 
-async function traiter(m, texte) {
-  if (!texte) { await ecouterReponse(m); return; }
-  essaisSilence = 0;
-  entendu("🗣️ " + texte);
-  const step = CONVERSATION[etape];
-
-  if (m === "q") {
-    if (correspond(step, texte)) {
-      const rep = step.oui[Math.floor(Math.random() * step.oui.length)];
-      sousTitre(rep);
-      await parler(rep);
-      await jouerEtape(etape + 1);
-    } else {
-      essais++;
-      if (essais <= 2) {
-        sousTitre(step.non);
-        await parler(step.non);
-        await ecouterReponse("q");
-      } else {
-        const rep = "Pas de problème ! On continue !";
-        sousTitre(rep);
-        await parler(rep);
-        await jouerEtape(etape + 1);
-      }
-    }
-  } else if (m === "repeat") {
-    const r = motsTrouves(step.phrase, texte);
-    if (r.score >= 0.8) {
-      const rep = "Bravo ! Très bien prononcé ! 🎉";
-      sousTitre(rep);
-      await parler(rep);
-      await jouerEtape(etape + 1);
-    } else if (r.score >= 0.4 && essais < 2) {
-      essais++;
-      const rep = "Presque ! Écoute encore.";
-      sousTitre(rep + " " + step.phrase);
-      await parler(rep);
-      await parler(step.phrase, true);
-      await parler("À toi !");
-      await ecouterReponse("repeat");
-    } else {
-      const rep = "Ce n'est pas grave ! On continue !";
-      sousTitre(rep);
-      await parler(rep);
-      await jouerEtape(etape + 1);
-    }
-  }
-}
-
-async function jouerEtape(i) {
-  if (i >= CONVERSATION.length) i = CONVERSATION.length - 1;
-  etape = i;
-  essais = 0;
+async function envoyer(texte) {
+  if (!texte || enTraitement) return;
+  enTraitement = true;
   essaisSilence = 0;
   cacher("btn-micro");
-  cacher("btn-restart");
-  const s = CONVERSATION[i];
+  entendu("🗣️ " + texte);
+  historique.push({ role: "user", content: texte });
+  sousTitre("Coach Léo réfléchit...");
   setOrbe("parle");
-  sousTitre(s.bot);
-  entendu("");
-  await parler(s.bot);
 
-  if (s.type === "q") {
-    await ecouterReponse("q");
-  } else if (s.type === "repeat") {
-    sousTitre(s.phrase);
-    await parler(s.phrase);
-    await parler("À toi ! Répète !");
-    await ecouterReponse("repeat");
-  } else if (s.type === "expose") {
-    sousTitre("Appuie sur le bouton, parle, puis appuie encore sur « J'ai fini ».");
-    montrer("btn-micro");
-    $("btn-micro").textContent = "🎤 Je commence";
-    setOrbe("idle");
-  } else if (s.type === "end") {
-    montrer("btn-restart");
-    setOrbe("idle");
-  }
-}
+  let rep = null;
+  try { rep = await repondreIA(); } catch (e) { rep = null; }
+  if (!rep) rep = ERREUR_IA;
 
-function evaluerExpose() {
-  const t = normaliser(transcriptionExpose);
-  const trouve = [...new Set(MOTS_EXPOSE.filter((m) => t.includes(normaliser(m))))];
-  const structures = [
-    ["bonjour|salut|je m'appelle", "tu salues"],
-    ["il faut|on joue", "tu parles du matériel"],
-    ["interdit|on ne peut pas", "tu donnes une règle"],
-    ["j'aime|parce que", "tu donnes ton avis"]
-  ];
-  const nbStruct = structures.filter(([p]) => p.split("|").some((x) => t.includes(normaliser(x)))).length;
-
-  let msg = "Super ! Tu as parlé " + secondes + " secondes. ";
-  if (trouve.length >= 5) msg += "J'ai entendu plein de mots du sport : " + trouve.slice(0, 6).join(", ") + ". Excellent ! ";
-  else if (trouve.length >= 2) msg += "J'ai entendu : " + trouve.slice(0, 5).join(", ") + ". Continue à utiliser les mots du sport ! ";
-  else msg += "Essaie d'utiliser les mots du sport : ballon, terrain, il faut... ";
-  msg += nbStruct >= 3 ? "Très bien, ta présentation est complète ! " :
-         nbStruct >= 1 ? "Pense aussi à : " + structures.filter(([p]) => !p.split("|").some((x) => t.includes(normaliser(x)))).map(([, l]) => l).join(", ") + ". " :
-         "Suis le plan : le sport, le matériel, les règles, et pourquoi tu l'aimes. ";
-  return msg;
+  historique.push({ role: "assistant", content: rep });
+  sousTitre(rep);
+  await parler(rep);
+  enTraitement = false;
+  ecouterReponse();
 }
 
 $("btn-commencer").addEventListener("click", async () => {
@@ -303,71 +223,46 @@ $("btn-commencer").addEventListener("click", async () => {
     montrer("avertissement");
     montrer("clavier");
   }
-  jouerEtape(0);
+  historique = [];
+  sousTitre(ACCUEIL);
+  await parler(ACCUEIL);
+  historique.push({ role: "assistant", content: ACCUEIL });
+  ecouterReponse();
 });
 
 $("btn-micro").addEventListener("click", () => {
-  const s = CONVERSATION[etape];
-  if (s.type === "expose") {
-    if (ecouteEnCours) {
-      arreterEcoute();
-      clearInterval(minuteurChrono);
-      $("btn-micro").textContent = "🎤 Je commence";
-      $("btn-micro").classList.remove("recording");
-      if (!transcriptionExpose && dernierEntendu) transcriptionExpose = dernierEntendu;
-      const msg = evaluerExpose();
-      sousTitre(msg);
-      parler(msg).then(() => jouerEtape(etape + 1));
-      return;
-    }
-    transcriptionExpose = "";
-    secondes = 0;
-    $("btn-micro").textContent = "⏹️ J'ai fini";
-    $("btn-micro").classList.add("recording");
-    demarrerEcoute(
-      true,
-      (final) => { transcriptionExpose = final; },
-      (interim) => entendu("🗣️ " + interim.slice(-100)),
-      () => {}
-    );
-    minuteurChrono = setInterval(() => {
-      secondes++;
-      if (secondes >= 90) {
-        arreterEcoute();
-        clearInterval(minuteurChrono);
-        $("btn-micro").textContent = "🎤 Je commence";
-        $("btn-micro").classList.remove("recording");
-        if (!transcriptionExpose && dernierEntendu) transcriptionExpose = dernierEntendu;
-        const msg = evaluerExpose();
-        sousTitre(msg);
-        parler(msg).then(() => jouerEtape(etape + 1));
-      }
-    }, 1000);
-  } else if (ecouteEnCours) {
+  if (enTraitement) return;
+  if (ecouteEnCours) {
     arreterEcoute();
-    clearInterval(minuteurChrono);
     if (dernierEntendu.trim()) {
-      traiter(mode || "q", dernierEntendu.trim());
+      envoyer(dernierEntendu.trim());
     } else if (gererErreurMicro()) {
       setOrbe("idle");
     } else {
-      ecouterReponse(mode || "q");
+      ecouterReponse();
     }
   } else {
-    ecouterReponse(mode || "q");
+    ecouterReponse();
   }
 });
 
 $("btn-restart").addEventListener("click", () => {
+  arreterEcoute();
+  if (synth) synth.cancel();
+  enTraitement = false;
+  historique = [];
   cacher("btn-restart");
-  jouerEtape(0);
+  montrer("btn-commencer");
+  sousTitre("Prêt ? Appuie sur Commencer !");
+  entendu("");
+  setOrbe("idle");
 });
 
 $("clavier").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && $("clavier").value.trim()) {
     const v = $("clavier").value.trim();
     $("clavier").value = "";
-    traiter(mode || "q", v);
+    envoyer(v);
   }
 });
 
