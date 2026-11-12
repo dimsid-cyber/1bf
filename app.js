@@ -7,11 +7,13 @@ let voix = null;
 let reco = null;
 let etape = 0;
 let essais = 0;
+let essaisSilence = 0;
 let mode = null;
+let dernierEntendu = "";
+let erreurReco = null;
 let transcriptionExpose = "";
 let secondes = 0;
 let minuteurChrono = null;
-let minuteurSilence = null;
 let ecouteEnCours = false;
 
 function normaliser(t) {
@@ -69,25 +71,18 @@ function parler(texte, lent = false) {
 }
 
 function setOrbe(etat) {
-  const o = $("orbe");
-  o.className = "orbe " + etat;
+  $("orbe").className = "orbe " + etat;
 }
 
-function sousTitre(t) {
-  $("sous-titre").textContent = t;
-}
-
-function entendu(t) {
-  $("entendu").textContent = t;
-}
-
+function sousTitre(t) { $("sous-titre").textContent = t; }
+function entendu(t) { $("entendu").textContent = t; }
 function montrer(id) { $(id).classList.remove("hidden"); }
 function cacher(id) { $(id).classList.add("hidden"); }
 
 function arreterEcoute() {
-  if (minuteurSilence) { clearTimeout(minuteurSilence); minuteurSilence = null; }
   if (reco) {
     reco.onend = null;
+    reco.onresult = null;
     try { reco.stop(); } catch (e) {}
     reco = null;
   }
@@ -95,8 +90,10 @@ function arreterEcoute() {
 }
 
 function demarrerEcoute(continu, onFinal, onInterim, onFin) {
-  if (!SR) { cacher("btn-micro"); montrer("clavier"); return false; }
+  if (!SR) return false;
   arreterEcoute();
+  dernierEntendu = "";
+  erreurReco = null;
   ecouteEnCours = true;
   reco = new SR();
   reco.lang = "fr-FR";
@@ -109,10 +106,12 @@ function demarrerEcoute(continu, onFinal, onInterim, onFin) {
       if (e.results[i].isFinal) final += e.results[i][0].transcript + " ";
       else interim += e.results[i][0].transcript;
     }
-    if (onInterim) onInterim((final + interim).trim());
-    if (final.trim()) onFinal(final.trim());
+    const tout = (final + interim).trim();
+    if (tout) dernierEntendu = tout;
+    if (onInterim && tout) onInterim(tout);
+    if (final.trim() && onFinal) onFinal(final.trim());
   };
-  reco.onerror = () => { if (onFin) onFin(final.trim()); };
+  reco.onerror = (e) => { erreurReco = e.error || "erreur"; };
   reco.onend = () => {
     ecouteEnCours = false;
     setOrbe("idle");
@@ -132,8 +131,7 @@ function motsTrouves(cible, dit) {
     if (idx !== -1) { p = idx + 1; return { mot, ok: true }; }
     return { mot, ok: false };
   });
-  const ok = mots.filter((m) => m.ok).length;
-  return { mots, score: ok / mots.length };
+  return { score: mots.filter((m) => m.ok).length / mots.length };
 }
 
 function correspond(step, texte) {
@@ -141,34 +139,57 @@ function correspond(step, texte) {
   return step.keys.some((k) => t.includes(normaliser(k)));
 }
 
-function transcriptionRecue() {
-  return $("entendu").textContent.includes("🗣️");
+function gererErreurMicro() {
+  if (!erreurReco) return false;
+  if (erreurReco === "not-allowed" || erreurReco === "service-not-allowed") {
+    const w = $("avertissement");
+    w.textContent = "⚠️ Le micro est bloqué. Autorise le micro pour ce site (icône 🔒 dans la barre d'adresse), ou écris tes réponses ci-dessous.";
+    montrer("avertissement");
+    montrer("clavier");
+    cacher("btn-micro");
+    return true;
+  }
+  if (erreurReco === "network") {
+    const w = $("avertissement");
+    w.textContent = "⚠️ La reconnaissance vocale a besoin d'internet et le réseau la bloque. Écris tes réponses ci-dessous, le bot te répondra à voix haute.";
+    montrer("avertissement");
+    montrer("clavier");
+    return true;
+  }
+  return false;
 }
 
-async function ecouterReponse(modeTraitement) {
-  mode = modeTraitement;
+async function ecouterReponse(m) {
+  mode = m;
   montrer("btn-micro");
   $("btn-micro").textContent = "🎤 Appuie et parle";
   $("btn-micro").classList.remove("recording");
   const lance = demarrerEcoute(
     false,
-    (final) => { arreterEcoute(); traiter(modeTraitement, final); },
+    (final) => { arreterEcoute(); traiter(m, final); },
     (interim) => entendu("🗣️ " + interim),
-    () => {}
+    () => finEcouteReponse(m)
   );
-  if (lance) {
-    minuteurSilence = setTimeout(async () => {
-      if (!transcriptionRecue()) {
-        arreterEcoute();
-        await parler("Tu es là ? Appuie sur le bouton et parle !");
-        setOrbe("idle");
-      }
-    }, 12000);
+  if (lance) setOrbe("ecoute");
+}
+
+async function finEcouteReponse(m) {
+  if (ecouteEnCours) return;
+  if (gererErreurMicro()) { setOrbe("idle"); return; }
+  if (dernierEntendu.trim()) { traiter(m, dernierEntendu.trim()); return; }
+  essaisSilence++;
+  if (essaisSilence <= 2) {
+    await parler("Je ne t'ai pas entendu ! Appuie sur le bouton et parle !");
+    ecouterReponse(m);
+  } else {
+    sousTitre("Appuie sur 🎤 et parle plus près du micro !");
+    setOrbe("idle");
   }
 }
 
 async function traiter(m, texte) {
   if (!texte) { await ecouterReponse(m); return; }
+  essaisSilence = 0;
   entendu("🗣️ " + texte);
   const step = CONVERSATION[etape];
 
@@ -219,6 +240,7 @@ async function jouerEtape(i) {
   if (i >= CONVERSATION.length) i = CONVERSATION.length - 1;
   etape = i;
   essais = 0;
+  essaisSilence = 0;
   cacher("btn-micro");
   cacher("btn-restart");
   const s = CONVERSATION[i];
@@ -235,7 +257,7 @@ async function jouerEtape(i) {
     await parler("À toi ! Répète !");
     await ecouterReponse("repeat");
   } else if (s.type === "expose") {
-    sousTitre("Appuie sur le bouton, parle, puis appuie encore pour arrêter.");
+    sousTitre("Appuie sur le bouton, parle, puis appuie encore sur « J'ai fini ».");
     montrer("btn-micro");
     $("btn-micro").textContent = "🎤 Je commence";
     setOrbe("idle");
@@ -292,6 +314,7 @@ $("btn-micro").addEventListener("click", () => {
       clearInterval(minuteurChrono);
       $("btn-micro").textContent = "🎤 Je commence";
       $("btn-micro").classList.remove("recording");
+      if (!transcriptionExpose && dernierEntendu) transcriptionExpose = dernierEntendu;
       const msg = evaluerExpose();
       sousTitre(msg);
       parler(msg).then(() => jouerEtape(etape + 1));
@@ -314,6 +337,7 @@ $("btn-micro").addEventListener("click", () => {
         clearInterval(minuteurChrono);
         $("btn-micro").textContent = "🎤 Je commence";
         $("btn-micro").classList.remove("recording");
+        if (!transcriptionExpose && dernierEntendu) transcriptionExpose = dernierEntendu;
         const msg = evaluerExpose();
         sousTitre(msg);
         parler(msg).then(() => jouerEtape(etape + 1));
@@ -321,7 +345,14 @@ $("btn-micro").addEventListener("click", () => {
     }, 1000);
   } else if (ecouteEnCours) {
     arreterEcoute();
-    setOrbe("idle");
+    clearInterval(minuteurChrono);
+    if (dernierEntendu.trim()) {
+      traiter(mode || "q", dernierEntendu.trim());
+    } else if (gererErreurMicro()) {
+      setOrbe("idle");
+    } else {
+      ecouterReponse(mode || "q");
+    }
   } else {
     ecouterReponse(mode || "q");
   }
