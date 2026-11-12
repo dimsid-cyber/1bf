@@ -3,6 +3,17 @@ const synth = window.speechSynthesis;
 
 const $ = (id) => document.getElementById(id);
 
+let voix = null;
+let reco = null;
+let etape = 0;
+let essais = 0;
+let mode = null;
+let transcriptionExpose = "";
+let secondes = 0;
+let minuteurChrono = null;
+let minuteurSilence = null;
+let ecouteEnCours = false;
+
 function normaliser(t) {
   return t
     .toLowerCase()
@@ -11,355 +22,322 @@ function normaliser(t) {
     .replace(/'/g, " ")
     .replace(/-/g, " ")
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(Boolean)
+    .join(" ");
+}
+
+function chargerVoix() {
+  return new Promise((resolve) => {
+    if (!synth) return resolve([]);
+    let v = synth.getVoices();
+    if (v.length) return resolve(v);
+    let n = 0;
+    const iv = setInterval(() => {
+      v = synth.getVoices();
+      if (v.length || ++n > 25) { clearInterval(iv); resolve(v); }
+    }, 200);
+    synth.onvoiceschanged = () => { v = synth.getVoices(); };
+  });
+}
+
+function choisirVoixFr(voices) {
+  const fr = voices.filter((v) => /^fr[-_]?/i.test(v.lang) || /french|français/i.test(v.name));
+  const prefs = [
+    /google.*fran/i, /amelie|amélie/i, /thomas/i, /denise/i, /charline/i,
+    /hortense/i, /marie/i, /audrey/i, /aurelie|aurélie/i, /french|français/i
+  ];
+  for (const p of prefs) {
+    const f = fr.find((v) => p.test(v.name));
+    if (f) return f;
+  }
+  return fr[0] || null;
 }
 
 function parler(texte, lent = false) {
-  if (!synth) return;
-  synth.cancel();
-  const u = new SpeechSynthesisUtterance(texte);
-  u.lang = "fr-FR";
-  u.rate = lent ? 0.6 : 0.95;
-  const voix = synth.getVoices().find(v => v.lang && v.lang.startsWith("fr"));
-  if (voix) u.voice = voix;
-  synth.speak(u);
+  return new Promise((resolve) => {
+    if (!synth) return resolve();
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(texte);
+    u.lang = "fr-FR";
+    if (voix) u.voice = voix;
+    u.rate = lent ? 0.62 : 0.95;
+    u.onstart = () => setOrbe("parle");
+    u.onend = () => resolve();
+    u.onerror = () => resolve();
+    synth.speak(u);
+  });
 }
 
-function creerReco(continu, onResultat, onInterim, onFin) {
-  if (!SR) return null;
-  const r = new SR();
-  r.lang = "fr-FR";
-  r.continuous = continu;
-  r.interimResults = true;
+function setOrbe(etat) {
+  const o = $("orbe");
+  o.className = "orbe " + etat;
+}
+
+function sousTitre(t) {
+  $("sous-titre").textContent = t;
+}
+
+function entendu(t) {
+  $("entendu").textContent = t;
+}
+
+function montrer(id) { $(id).classList.remove("hidden"); }
+function cacher(id) { $(id).classList.add("hidden"); }
+
+function arreterEcoute() {
+  if (minuteurSilence) { clearTimeout(minuteurSilence); minuteurSilence = null; }
+  if (reco) {
+    reco.onend = null;
+    try { reco.stop(); } catch (e) {}
+    reco = null;
+  }
+  ecouteEnCours = false;
+}
+
+function demarrerEcoute(continu, onFinal, onInterim, onFin) {
+  if (!SR) { cacher("btn-micro"); montrer("clavier"); return false; }
+  arreterEcoute();
+  ecouteEnCours = true;
+  reco = new SR();
+  reco.lang = "fr-FR";
+  reco.continuous = continu;
+  reco.interimResults = true;
   let final = "";
-  r.onresult = (e) => {
+  reco.onresult = (e) => {
     let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       if (e.results[i].isFinal) final += e.results[i][0].transcript + " ";
       else interim += e.results[i][0].transcript;
     }
-    onInterim(final + interim);
-    if (final.trim()) onResultat(final.trim());
+    if (onInterim) onInterim((final + interim).trim());
+    if (final.trim()) onFinal(final.trim());
   };
-  r.onerror = () => onFin && onFin(final.trim());
-  r.onend = () => onFin && onFin(final.trim());
-  return r;
+  reco.onerror = () => { if (onFin) onFin(final.trim()); };
+  reco.onend = () => {
+    ecouteEnCours = false;
+    setOrbe("idle");
+    if (onFin) onFin(final.trim());
+  };
+  reco.onstart = () => setOrbe("ecoute");
+  try { reco.start(); } catch (e) { ecouteEnCours = false; return false; }
+  return true;
 }
 
-const tabs = document.querySelectorAll(".tab");
-tabs.forEach(t => t.addEventListener("click", () => {
-  tabs.forEach(x => x.classList.remove("active"));
-  document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
-  t.classList.add("active");
-  $(t.dataset.tab).classList.add("active");
-}));
-
-let phraseCourante = null;
-let recoPron = null;
-
-function afficherGroupes() {
-  const c = $("phrase-groupes");
-  PHRASES.forEach(g => {
-    const div = document.createElement("div");
-    div.className = "groupe";
-    const h = document.createElement("h3");
-    h.textContent = g.groupe;
-    div.appendChild(h);
-    g.items.forEach(item => {
-      const b = document.createElement("button");
-      b.className = "chip";
-      b.textContent = item.t;
-      b.addEventListener("click", () => {
-        document.querySelectorAll("#phrase-groupes .chip").forEach(x => x.classList.remove("active"));
-        b.classList.add("active");
-        phraseCourante = item;
-        $("phrase-texte").textContent = item.t;
-        $("phrase-tip").textContent = "💡 " + item.tip;
-        $("pron-reco").textContent = "";
-        $("pron-mots").innerHTML = "";
-        $("pron-feedback").textContent = "";
-        $("pron-feedback").className = "feedback";
-      });
-      div.appendChild(b);
-    });
-    c.appendChild(div);
-  });
-}
-
-function comparerMots(cible, dit) {
+function motsTrouves(cible, dit) {
   const cibleN = normaliser(cible);
   const ditN = normaliser(dit);
   let p = 0;
-  return cibleN.map(mot => {
+  const mots = cibleN.split(" ").map((mot) => {
     const idx = ditN.indexOf(mot, p);
     if (idx !== -1) { p = idx + 1; return { mot, ok: true }; }
     return { mot, ok: false };
   });
+  const ok = mots.filter((m) => m.ok).length;
+  return { mots, score: ok / mots.length };
 }
 
-function afficherPronResultat(dit) {
-  if (!phraseCourante) return;
-  const mots = comparerMots(phraseCourante.t, dit);
-  const c = $("pron-mots");
-  c.innerHTML = "";
-  let ok = 0;
-  mots.forEach(m => {
-    if (m.ok) ok++;
-    const s = document.createElement("span");
-    s.className = "mot " + (m.ok ? "ok" : "ko");
-    s.textContent = m.mot;
-    c.appendChild(s);
-  });
-  const score = ok / mots.length;
-  const f = $("pron-feedback");
-  if (score >= 0.8) {
-    f.textContent = "🎉 Bravo ! C'est très bien prononcé !";
-    f.className = "feedback good";
-    parler("Bravo ! C'est très bien !");
-  } else if (score >= 0.5) {
-    f.textContent = "👍 Presque ! Les mots en rouge sont à répéter.";
-    f.className = "feedback mid";
-  } else {
-    f.textContent = "💪 Réessaie ! Écoute d'abord la phrase, puis répète.";
-    f.className = "feedback bad";
+function correspond(step, texte) {
+  const t = normaliser(texte);
+  return step.keys.some((k) => t.includes(normaliser(k)));
+}
+
+function transcriptionRecue() {
+  return $("entendu").textContent.includes("🗣️");
+}
+
+async function ecouterReponse(modeTraitement) {
+  mode = modeTraitement;
+  montrer("btn-micro");
+  $("btn-micro").textContent = "🎤 Appuie et parle";
+  $("btn-micro").classList.remove("recording");
+  const lance = demarrerEcoute(
+    false,
+    (final) => { arreterEcoute(); traiter(modeTraitement, final); },
+    (interim) => entendu("🗣️ " + interim),
+    () => {}
+  );
+  if (lance) {
+    minuteurSilence = setTimeout(async () => {
+      if (!transcriptionRecue()) {
+        arreterEcoute();
+        await parler("Tu es là ? Appuie sur le bouton et parle !");
+        setOrbe("idle");
+      }
+    }, 12000);
   }
 }
 
-$("btn-ecouter").addEventListener("click", () => phraseCourante && parler(phraseCourante.t));
-$("btn-ecouter-lent").addEventListener("click", () => phraseCourante && parler(phraseCourante.t, true));
+async function traiter(m, texte) {
+  if (!texte) { await ecouterReponse(m); return; }
+  entendu("🗣️ " + texte);
+  const step = CONVERSATION[etape];
 
-$("btn-micro").addEventListener("click", () => {
+  if (m === "q") {
+    if (correspond(step, texte)) {
+      const rep = step.oui[Math.floor(Math.random() * step.oui.length)];
+      sousTitre(rep);
+      await parler(rep);
+      await jouerEtape(etape + 1);
+    } else {
+      essais++;
+      if (essais <= 2) {
+        sousTitre(step.non);
+        await parler(step.non);
+        await ecouterReponse("q");
+      } else {
+        const rep = "Pas de problème ! On continue !";
+        sousTitre(rep);
+        await parler(rep);
+        await jouerEtape(etape + 1);
+      }
+    }
+  } else if (m === "repeat") {
+    const r = motsTrouves(step.phrase, texte);
+    if (r.score >= 0.8) {
+      const rep = "Bravo ! Très bien prononcé ! 🎉";
+      sousTitre(rep);
+      await parler(rep);
+      await jouerEtape(etape + 1);
+    } else if (r.score >= 0.4 && essais < 2) {
+      essais++;
+      const rep = "Presque ! Écoute encore.";
+      sousTitre(rep + " " + step.phrase);
+      await parler(rep);
+      await parler(step.phrase, true);
+      await parler("À toi !");
+      await ecouterReponse("repeat");
+    } else {
+      const rep = "Ce n'est pas grave ! On continue !";
+      sousTitre(rep);
+      await parler(rep);
+      await jouerEtape(etape + 1);
+    }
+  }
+}
+
+async function jouerEtape(i) {
+  if (i >= CONVERSATION.length) i = CONVERSATION.length - 1;
+  etape = i;
+  essais = 0;
+  cacher("btn-micro");
+  cacher("btn-restart");
+  const s = CONVERSATION[i];
+  setOrbe("parle");
+  sousTitre(s.bot);
+  entendu("");
+  await parler(s.bot);
+
+  if (s.type === "q") {
+    await ecouterReponse("q");
+  } else if (s.type === "repeat") {
+    sousTitre(s.phrase);
+    await parler(s.phrase);
+    await parler("À toi ! Répète !");
+    await ecouterReponse("repeat");
+  } else if (s.type === "expose") {
+    sousTitre("Appuie sur le bouton, parle, puis appuie encore pour arrêter.");
+    montrer("btn-micro");
+    $("btn-micro").textContent = "🎤 Je commence";
+    setOrbe("idle");
+  } else if (s.type === "end") {
+    montrer("btn-restart");
+    setOrbe("idle");
+  }
+}
+
+function evaluerExpose() {
+  const t = normaliser(transcriptionExpose);
+  const trouve = [...new Set(MOTS_EXPOSE.filter((m) => t.includes(normaliser(m))))];
+  const structures = [
+    ["bonjour|salut|je m'appelle", "tu salues"],
+    ["il faut|on joue", "tu parles du matériel"],
+    ["interdit|on ne peut pas", "tu donnes une règle"],
+    ["j'aime|parce que", "tu donnes ton avis"]
+  ];
+  const nbStruct = structures.filter(([p]) => p.split("|").some((x) => t.includes(normaliser(x)))).length;
+
+  let msg = "Super ! Tu as parlé " + secondes + " secondes. ";
+  if (trouve.length >= 5) msg += "J'ai entendu plein de mots du sport : " + trouve.slice(0, 6).join(", ") + ". Excellent ! ";
+  else if (trouve.length >= 2) msg += "J'ai entendu : " + trouve.slice(0, 5).join(", ") + ". Continue à utiliser les mots du sport ! ";
+  else msg += "Essaie d'utiliser les mots du sport : ballon, terrain, il faut... ";
+  msg += nbStruct >= 3 ? "Très bien, ta présentation est complète ! " :
+         nbStruct >= 1 ? "Pense aussi à : " + structures.filter(([p]) => !p.split("|").some((x) => t.includes(normaliser(x)))).map(([, l]) => l).join(", ") + ". " :
+         "Suis le plan : le sport, le matériel, les règles, et pourquoi tu l'aimes. ";
+  return msg;
+}
+
+$("btn-commencer").addEventListener("click", async () => {
+  cacher("btn-commencer");
+  const voices = await chargerVoix();
+  voix = choisirVoixFr(voices);
+  if (!voix && synth) {
+    const w = $("avertissement");
+    w.textContent = "⚠️ Aucune voix française trouvée sur cet appareil. Sur iPhone : Réglages → Accessibilité → Contenus énoncés → Voix → Français. Sur Android : Paramètres → Gestion de la langue → Synthèse vocale.";
+    montrer("avertissement");
+  }
   if (!SR) {
-    $("pron-reco").textContent = "⚠️ Ton navigateur ne reconnaît pas la voix. Utilise Chrome, Edge ou Safari.";
-    return;
+    const w = $("avertissement");
+    w.textContent = "ℹ️ La reconnaissance vocale n'est pas disponible ici. Utilise Chrome, Edge ou Safari, ou écris tes réponses.";
+    montrer("avertissement");
+    montrer("clavier");
   }
-  if (!phraseCourante) {
-    $("pron-reco").textContent = "D'abord, choisis une phrase ci-dessus !";
-    return;
-  }
-  if (recoPron) { recoPron.stop(); recoPron = null; return; }
-  const btn = $("btn-micro");
-  btn.textContent = "⏹️ Stop";
-  btn.classList.add("recording");
-  $("pron-reco").textContent = "J'écoute... répète la phrase ! 🎧";
-  $("pron-feedback").textContent = "";
-  $("pron-feedback").className = "feedback";
-  recoPron = creerReco(false,
-    (final) => { afficherPronResultat(final); recoPron && recoPron.stop(); },
-    (interim) => { $("pron-reco").textContent = "🗣️ " + interim; },
-    () => {
-      btn.textContent = "🎤 Je répète !";
-      btn.classList.remove("recording");
-      recoPron = null;
-    });
-  recoPron.start();
+  jouerEtape(0);
 });
 
-let etape = 0;
-let recoChat = null;
-let enEcouteChat = false;
-
-function ajouterBulle(texte, qui) {
-  const c = $("chat");
-  const b = document.createElement("div");
-  b.className = "bulle " + qui;
-  b.textContent = texte;
-  c.appendChild(b);
-  c.scrollTop = c.scrollHeight;
-}
-
-function reponseBot(reponses) {
-  const r = reponses[Math.floor(Math.random() * reponses.length)];
-  ajouterBulle(r, "bot");
-  parler(r);
-}
-
-function traiterReponse(texte) {
-  ajouterBulle(texte, "user");
-  const etapeActuelle = DIALOG[etape];
-  if (!etapeActuelle) return;
-  const t = normaliser(texte).join(" ");
-  const trouve = etapeActuelle.keywords.some(k => t.includes(normaliser(k).join(" ")) || normaliser(k).join(" ").split(" ").every(m => t.includes(m)));
-  if (trouve) {
-    reponseBot(etapeActuelle.oui);
-    if (etapeActuelle.next !== null && etapeActuelle.next > etape) {
-      etape = etapeActuelle.next;
-      setTimeout(() => {
-        ajouterBulle(DIALOG[etape].bot, "bot");
-        parler(DIALOG[etape].bot);
-      }, 1800);
+$("btn-micro").addEventListener("click", () => {
+  const s = CONVERSATION[etape];
+  if (s.type === "expose") {
+    if (ecouteEnCours) {
+      arreterEcoute();
+      clearInterval(minuteurChrono);
+      $("btn-micro").textContent = "🎤 Je commence";
+      $("btn-micro").classList.remove("recording");
+      const msg = evaluerExpose();
+      sousTitre(msg);
+      parler(msg).then(() => jouerEtape(etape + 1));
+      return;
     }
+    transcriptionExpose = "";
+    secondes = 0;
+    $("btn-micro").textContent = "⏹️ J'ai fini";
+    $("btn-micro").classList.add("recording");
+    demarrerEcoute(
+      true,
+      (final) => { transcriptionExpose = final; },
+      (interim) => entendu("🗣️ " + interim.slice(-100)),
+      () => {}
+    );
+    minuteurChrono = setInterval(() => {
+      secondes++;
+      if (secondes >= 90) {
+        arreterEcoute();
+        clearInterval(minuteurChrono);
+        $("btn-micro").textContent = "🎤 Je commence";
+        $("btn-micro").classList.remove("recording");
+        const msg = evaluerExpose();
+        sousTitre(msg);
+        parler(msg).then(() => jouerEtape(etape + 1));
+      }
+    }, 1000);
+  } else if (ecouteEnCours) {
+    arreterEcoute();
+    setOrbe("idle");
   } else {
-    reponseBot(etapeActuelle.non);
+    ecouterReponse(mode || "q");
   }
-}
-
-function envoyerChat() {
-  const v = $("chat-input").value.trim();
-  if (!v) return;
-  $("chat-input").value = "";
-  traiterReponse(v);
-}
-
-$("btn-envoyer").addEventListener("click", envoyerChat);
-$("chat-input").addEventListener("keydown", e => { if (e.key === "Enter") envoyerChat(); });
-
-$("btn-micro-chat").addEventListener("click", () => {
-  if (!SR) {
-    $("chat-reco").textContent = "⚠️ Reconnaissance vocale non disponible. Utilise Chrome, Edge ou Safari, ou écris.";
-    return;
-  }
-  if (enEcouteChat) { recoChat && recoChat.stop(); return; }
-  enEcouteChat = true;
-  const btn = $("btn-micro-chat");
-  btn.textContent = "⏹️ Stop";
-  btn.classList.add("recording");
-  $("chat-reco").textContent = "J'écoute... parle ! 🎧";
-  recoChat = creerReco(false,
-    (final) => { traiterReponse(final); },
-    (interim) => { $("chat-reco").textContent = "🗣️ " + interim; },
-    () => {
-      enEcouteChat = false;
-      btn.textContent = "🎤 Parler";
-      btn.classList.remove("recording");
-      $("chat-reco").textContent = "";
-      recoChat = null;
-    });
-  recoChat.start();
 });
 
 $("btn-restart").addEventListener("click", () => {
-  $("chat").innerHTML = "";
-  etape = 0;
-  ajouterBulle(DIALOG[0].bot, "bot");
-  parler(DIALOG[0].bot);
+  cacher("btn-restart");
+  jouerEtape(0);
 });
 
-function afficherPlan() {
-  const c = $("plan");
-  EXPOSE_PLAN.forEach(e => {
-    const d = document.createElement("div");
-    d.className = "etape";
-    const h = document.createElement("h3");
-    h.textContent = e.titre;
-    d.appendChild(h);
-    const ul = document.createElement("ul");
-    e.exemples.forEach(x => {
-      const li = document.createElement("li");
-      li.textContent = x;
-      const btn = document.createElement("button");
-      btn.className = "chip";
-      btn.textContent = "🔊";
-      btn.style.marginLeft = "0.4rem";
-      btn.addEventListener("click", () => parler(x));
-      li.appendChild(btn);
-      ul.appendChild(li);
-    });
-    d.appendChild(ul);
-    c.appendChild(d);
-  });
-}
-
-let recoExpose = null;
-let chronoTimer = null;
-let secondes = 0;
-let transcriptionExpose = "";
-
-function evaluerExpose() {
-  const t = normaliser(transcriptionExpose).join(" ");
-  const c = $("expose-eval");
-  c.innerHTML = "";
-
-  const ligne = (ico, label, detail) => {
-    const d = document.createElement("div");
-    d.className = "eval-item";
-    d.innerHTML = `<span class="ico">${ico}</span><span><span class="label">${label}</span><br><span class="detail">${detail}</span></span>`;
-    c.appendChild(d);
-  };
-
-  const structures = [
-    ["bonjour", "Je salue"],
-    ["je m'appelle", "Je me présente"],
-    ["je vais vous présenter|mon sport", "Je présente mon sport"],
-    ["il faut|on joue", "Je parle du matériel et des règles"],
-    ["interdit|on ne peut pas", "Je donne une règle interdite"],
-    ["j'aime|parce que", "Je donne mon avis"]
-  ];
-  let nbStruct = 0;
-  structures.forEach(([pat, label]) => {
-    const ok = pat.split("|").some(p => t.includes(normaliser(p).join(" ")));
-    if (ok) nbStruct++;
-    ligne(ok ? "✅" : "⬜", label, ok ? "Présent dans ton exposé" : "À ajouter ! Regarde le plan.");
-  });
-
-  const motsTrouves = [...new Set(EXPOSE_MOTS_CLES.filter(m => t.includes(normaliser(m).join(" "))))];
-  const pct = Math.min(100, Math.round(motsTrouves.length / 8 * 100));
-  ligne(pct >= 60 ? "✅" : pct >= 30 ? "🟡" : "⬜",
-    "Vocabulaire du sport",
-    pct + "% — mots utilisés : " + (motsTrouves.slice(0, 10).join(", ") || "aucun pour l'instant"));
-
-  const dureeOk = secondes >= 45;
-  ligne(dureeOk ? "✅" : "🟡", "Durée : " + fmtTemps(secondes),
-    dureeOk ? "C'est une bonne durée !" : "Objectif : au moins 45 secondes. Continue !");
-
-  const score = Math.round((nbStruct / structures.length) * 60 + pct * 0.4);
-  const s = document.createElement("p");
-  s.className = "score-final";
-  s.textContent = "Score : " + score + " / 100 " + (score >= 75 ? "🎉 Excellent !" : score >= 50 ? "👍 Bien, continue !" : "💪 Entraîne-toi encore !");
-  c.appendChild(s);
-
-  const p = document.createElement("p");
-  p.style.cssText = "font-size:0.88rem;color:#4a5578;margin-top:0.5rem;font-style:italic";
-  p.textContent = "Ce que j'ai entendu : " + (transcriptionExpose || "—");
-  c.appendChild(p);
-}
-
-function fmtTemps(s) {
-  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-}
-
-$("btn-micro-expose").addEventListener("click", () => {
-  if (!SR) {
-    $("expose-reco").textContent = "⚠️ Reconnaissance vocale non disponible. Utilise Chrome, Edge ou Safari.";
-    return;
+$("clavier").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && $("clavier").value.trim()) {
+    const v = $("clavier").value.trim();
+    $("clavier").value = "";
+    traiter(mode || "q", v);
   }
-  const btn = $("btn-micro-expose");
-  if (recoExpose) {
-    recoExpose.stop();
-    return;
-  }
-  transcriptionExpose = "";
-  secondes = 0;
-  $("expose-eval").innerHTML = "";
-  btn.textContent = "⏹️ Stop";
-  btn.classList.add("recording");
-  $("expose-reco").textContent = "C'est parti ! Présente ton exposé 🎤";
-  chronoTimer = setInterval(() => {
-    secondes++;
-    $("chrono").textContent = fmtTemps(secondes);
-  }, 1000);
-  recoExpose = creerReco(true,
-    (final) => { transcriptionExpose = final; },
-    (interim) => { $("expose-reco").textContent = "🗣️ " + interim.slice(-120); },
-    () => {
-      clearInterval(chronoTimer);
-      btn.textContent = "🎤 Je commence";
-      btn.classList.remove("recording");
-      $("expose-reco").textContent = "";
-      recoExpose = null;
-      evaluerExpose();
-    });
-  recoExpose.start();
 });
 
-function init() {
-  afficherGroupes();
-  afficherPlan();
-  ajouterBulle(DIALOG[0].bot, "bot");
-  if (!SR) {
-    $("support-note").textContent = "Pour parler avec le micro, utilise Chrome, Edge ou Safari. Sinon, tu peux écrire dans le dialogue.";
-  }
-  if (synth) synth.onvoiceschanged = () => {};
-}
-
-init();
+window.addEventListener("beforeunload", () => { arreterEcoute(); if (synth) synth.cancel(); });
